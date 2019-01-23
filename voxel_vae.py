@@ -12,7 +12,7 @@ VOXEL_SPACE_SIZE = 16
 
 
 class VAE(object):
-    def __init__(self, input_shape, latent_dimensions, beta=2.5, batch_size=100, checkpoint_dir=None):
+    def __init__(self, input_shape, latent_dimensions, beta=1.0, batch_size=100, checkpoint_dir=None):
         self.current_best = None
         self.current_episode = None
         self.beta = beta
@@ -37,7 +37,7 @@ class VAE(object):
 
         layer_flatten = tf.contrib.layers.flatten(inputs=layer_4)
 
-        layer_idk = tf.contrib.layers.fully_connected(inputs=layer_flatten, num_outputs=256)
+        layer_idk = tf.contrib.layers.fully_connected(inputs=layer_flatten, num_outputs=512)
 
         self.mus = tf.contrib.layers.fully_connected(inputs=layer_idk, num_outputs=self.latent_dimensions,
                                                      activation_fn=None)
@@ -71,8 +71,19 @@ class VAE(object):
         reconstruction_err *= np.prod(self.input_shape)
         self.loss = tf.reduce_mean(self.beta * kl_loss + reconstruction_err)
 
-        # reconstruction_err = tf.nn.sigmoid_cross_entropy_with_logits(labels=self.enc_in, logits=self.dec_out)
-        # self.loss = tf.reduce_mean(reconstruction_err)
+        # def vae_loss(x_true, x_reconstructed):
+        #     # Reconstruction loss
+        #     x_reconstructed =tf.nn.tanh(x_reconstructed)
+        #     encode_decode_loss = x_true * tf.log(1e-10 + x_reconstructed) \
+        #                          + (1 - x_true) * tf.log(1e-10 + 1 - x_reconstructed)
+        #     encode_decode_loss = -tf.reduce_sum(encode_decode_loss, 1)
+        #     # KL Divergence loss
+        #     kl_loss = 1 + self.log_var - tf.pow(self.mus, 2) - tf.exp(self.log_var)
+        #     kl_loss = -0.5 * tf.reduce_sum(kl_loss, axis=-1)
+        #
+        #     return tf.reduce_mean(encode_decode_loss + kl_loss)
+        #
+        # self.loss = vae_loss(self.enc_in, self.dec_out)
 
         self.train_op = self.optimizer.minimize(self.loss)
         self.sess = tf.Session()
@@ -107,17 +118,22 @@ class VAE(object):
             ax.view_init(24, 144)
             recon = self.full_pass(data[:self.batch_size])[0].reshape((self.batch_size, ) + self.input_shape)
             print('initial: max: %s min: %s mean: %s' % (np.max(recon), np.min(recon), np.mean(recon)))
-            ax.voxels(data[0] > 0.5, facecolors=[0, 0, 1, 0.3], edgecolor=[0, 0, 1, 0.0])
-            # ax.voxels(recon[0] > 0.5, facecolors=[0, 1, 0, 0.2], edgecolor=[0, 1, 0, 0.5])
-            # overlap green
+            # ground truth
+            ax.voxels(data[0] > 0.5, facecolors=[0, 0, 1, 0.5], edgecolor=[0, 0, 1, 0.0])
+            # reconstruction 'fog'
+            ax.voxels(recon[0] > 0.0,
+                      facecolors=np.array([[[[1, 1, 0, min(i*2, 1)]
+                                             for i in j] for j in k] for k in recon[0]]),
+                      edgecolor=[1, 0, 0, 0])
+
+            # true positives
             ax.voxels(np.logical_and(data[0] > 0.5, recon[0] > 0.5), facecolors=[0, 1, 0, 0.0],
                       edgecolor=[0, 1, 0, 0.7])
-            # orig only blue
-            # ax.voxels(np.logical_and(data[0] > 0.5, recon[0] <= 0.5), facecolors=[0, 0, 1, 0.4],
-            # edgecolor=[0, 0, 1, 0.0])
-            # recon only red
+
+            # false positives
             ax.voxels(np.logical_and(data[0] <= 0.5, recon[0] > 0.5), facecolors=[1, 0, 0, 0.0],
                       edgecolor=[1, 0, 0, 0.7])
+
             plt.pause(0.0000001)
         with self.sess as session:
             for i in range(num_episodes):
@@ -140,38 +156,44 @@ class VAE(object):
                                             len(str(num_episodes-i+self.current_episode))).format(self.current_episode)
                         print(
                             'trained {_trained_ep_samples} of {_train_data_len} samples '
-                            'for episode {_cur_ep_str} (loss:{_cur_loss}, err:{_cur_err}'.format(**self.__dict__))
-                        print('sigmas:', np.mean(np.exp(0.5 * log_var), axis=0))
+                            'for episode {_cur_ep_str} (loss:{_cur_loss}, err:{_cur_err}), '.format(**self.__dict__),
+                            'sigmas:', str(np.mean(np.exp(0.5 * log_var), axis=0)).replace('\n', ' '))
+
+                        print('current max: %s min: %s mean: %s, total voxels: %s' %
+                              (np.max(dec_out), np.min(dec_out), np.mean(dec_out), np.sum(dec_out > 0.5)))
                         if loss < self.current_best:
                             self.current_best = loss
                             print('>>>>>>>> new best: %r' % self.current_best)
                             self._save('best', loss=loss, episode=self.current_episode)
-                            if plot_best:
-                                errs = [np.sum(s) for s in np.sum(np.abs(batch-dec_out), axis=1)]
-                                num_vox_orig = [np.sum(s) for s in np.sum(batch, axis=1)]
-                                num_vox_recon = [np.sum(s) for s in np.sum(dec_out > 0.5, axis=1)]
-                                print(np.max(dec_out))
-                                best_idx = int(np.argmin(errs))
-                                ax.cla()
-                                plt.title('err: %0.3f, orig_vox: %s, rec_vox: %s' %
-                                          (errs[best_idx], num_vox_orig[best_idx], num_vox_recon[best_idx]))
-                                ax.voxels(batch[best_idx] > 0.5, facecolors=[0, 0, 1, 0.5],
-                                          edgecolor=[1, 0, 0, 0.0])
-                                 #ax.voxels(dec_out[best_idx] > 0.5, facecolors=[0, 1, 0, 0.2],
-                                # edgecolor=[0, 1, 0, 0.5])
-                                # overlap green
-                                ax.voxels(np.logical_and(batch[best_idx] > 0.5, dec_out[best_idx] > 0.5),
-                                          facecolors=[0, 1, 0, 0.0],
-                                          edgecolor=[0, 1, 0, 0.9])
-                                # orig only blue
-                                #ax.voxels(np.logical_and(batch[best_idx] > 0.5, dec_out[best_idx] <= 0.5),
-                                # facecolors=[0, 0, 1, 0.4],
-                                #          edgecolor=[0, 0, 1, 0.0])
-                                # recon only red
-                                ax.voxels(np.logical_and(batch[best_idx] <= 0.5, dec_out[best_idx] > 0.5),
-                                          facecolors=[1, 0, 0, 0.0],
-                                          edgecolor=[1, 0, 0, 0.9])
-                                plt.pause(0.0000001)
+                        if plot_best:
+                            errs = [np.sum(s) for s in np.sum(np.abs(batch-dec_out), axis=1)]
+                            num_vox_orig = [np.sum(s) for s in np.sum(batch, axis=1)]
+                            num_vox_recon = [np.sum(s) for s in np.sum(dec_out > 0.5, axis=1)]
+                            if self.current_best == loss:
+                                plot_idx = int(np.argmin(errs))
+                            else:
+                                plot_idx = np.random.randint(0, len(errs))
+                            ax.cla()
+                            plt.title('err: %0.3f, orig_vox: %s, rec_vox: %s' %
+                                      (errs[plot_idx], num_vox_orig[plot_idx], num_vox_recon[plot_idx]))
+                            # ground truth
+                            ax.voxels(batch[plot_idx] > 0.5, facecolors=[0, 0, 1, 0.5],
+                                      edgecolor=[1, 0, 0, 0.0])
+                            # reconstruction 'fog'
+                            ax.voxels(dec_out[plot_idx] > 0.1,
+                                      facecolors=np.array([[[[1, 1, 0, min(i*2, 1)]
+                                                             for i in j] for j in k] for k in dec_out[plot_idx]]),
+                                      edgecolor=[0, 0, 1, 0.0])
+                            # true positives
+                            ax.voxels(np.logical_and(batch[plot_idx] > 0.5, dec_out[plot_idx] > 0.5),
+                                      facecolors=[0, 1, 0, 0.0],
+                                      edgecolor=[0, 1, 0, 0.9])
+
+                            # false positives
+                            ax.voxels(np.logical_and(batch[plot_idx] <= 0.5, dec_out[plot_idx] > 0.5),
+                                      facecolors=[1, 0, 0, 0.0],
+                                      edgecolor=[1, 0, 0, 0.9])
+                            plt.pause(0.0000001)
 
                         self._save(loss=self._cur_loss, episode=self.current_episode)
 
@@ -233,7 +255,7 @@ class VAE(object):
 
 
 def train_that_data(voxel_filename):
-    _batch_size = 48
+    _batch_size = 16
 
     vae = VAE((VOXEL_SPACE_SIZE, VOXEL_SPACE_SIZE, VOXEL_SPACE_SIZE), LATENT_DIMENSIONS, batch_size=_batch_size)
     train_data = np.load(voxel_filename)
@@ -288,5 +310,5 @@ def plot_that_data(voxel_filename):
 
 
 if __name__ == '__main__':
-    # plot_that_data("/home/ffriese/prj-robotic-arms/voxel_vae/transformed voxel_data.npy")
-    train_that_data("/home/ffriese/prj-robotic-arms/voxel_vae/transformed voxel_data.npy")
+    # plot_that_data("/home/ffriese/projects/voxel_vae/shifted_voxels.npy")
+    train_that_data("/home/ffriese/projects/voxel_vae/shifted_voxels_rot.npy")
